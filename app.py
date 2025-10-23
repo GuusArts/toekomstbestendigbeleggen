@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import math
-import secrets
-from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Tuple
 
 import pandas as pd
 import streamlit as st
-from streamlit.connections import ExperimentalBaseConnection
 
 
 st.set_page_config(page_title="Toekomstbestendig Beleggen", page_icon="📱", layout="wide")
@@ -28,146 +25,13 @@ EXPENSE_COLUMNS = ["Categorie", "Bedrag", "Frequentie"]
 WISHLIST_COLUMNS = ["Doel", "Doelbedrag", "Maandelijkse Bijdrage"]
 
 
-def hash_password(password: str, salt: str = "") -> str:
-    return hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
-def generate_password_hash(password: str, salt: str | None = None) -> Tuple[str, str]:
-    """Create a salted hash for storage in Streamlit secrets."""
-
-    if salt is None:
-        salt = secrets.token_hex(16)
-    return salt, hash_password(password, salt)
-
-
-class SecretsAuthConnection(ExperimentalBaseConnection):
-    """Authentication backend that reads users from Streamlit secrets."""
-
-    def _connect(self, **kwargs):  # noqa: D401 (we keep default docstring style)
-        users = self._secrets.get("users", {}) if self._secrets else {}
-        normalised: Dict[str, Dict[str, str]] = {}
-
-        for username, credentials in users.items():
-            if isinstance(credentials, dict):
-                password_hash = credentials.get("password_hash")
-                salt = credentials.get("salt", "")
-            else:
-                password_hash = str(credentials)
-                salt = ""
-
-            if password_hash:
-                normalised[str(username)] = {
-                    "password_hash": password_hash,
-                    "salt": salt,
-                }
-
-        self._users = normalised
-        return self
-
-    @property
-    def configured(self) -> bool:
-        return bool(getattr(self, "_users", {}))
-
-    def authenticate(self, username: str, password: str) -> bool:
-        if not self.configured:
-            return False
-
-        record = self._users.get(username)
-        if not record:
-            return False
-
-        expected_hash = record.get("password_hash", "")
-        salt = record.get("salt", "")
-        return expected_hash == hash_password(password, salt)
-
-
-@st.cache_resource
-def load_auth_backend() -> SecretsAuthConnection | None:
-    """Initialise the configured authentication backend."""
-
-    try:
-        return st.connection("secure_auth", type=SecretsAuthConnection)
-    except Exception as exc:  # noqa: BLE001
-        st.warning(
-            "Authenticatie kon niet worden initialiseerd. "
-            "Controleer of `[connections.secure_auth]` in `secrets.toml` bestaat."
-        )
-        st.info(f"Technische details: {exc}")
-        return None
-
-
-@contextmanager
-def bordered_container(border: bool = False):
-    """Create a container with backwards compatibility for the border flag."""
-
-    if border:
-        try:
-            container = st.container(border=True)
-        except TypeError:
-            container = st.container()
-    else:
-        container = st.container()
-
-    with container:
-        yield
-
-
-def safe_progress(value: float, text: str | None = None):
-    """Render a progress bar while tolerating older Streamlit versions."""
-
-    if text is None:
-        return st.progress(value)
-
-    try:
-        return st.progress(value, text=text)
-    except TypeError:
-        return st.progress(value)
-
-
-def safe_data_editor(data: pd.DataFrame, key: str, **kwargs) -> pd.DataFrame:
-    """Use the modern data editor with fallbacks for legacy installs."""
-
-    editor = getattr(st, "data_editor", None)
-    if callable(editor):
-        return editor(data, key=key, **kwargs)
-
-    experimental = getattr(st, "experimental_data_editor", None)
-    if callable(experimental):
-        return experimental(data, key=key, **kwargs)
-
-    st.warning(
-        "Deze Streamlit-versie ondersteunt geen interactieve tabelbewerking. "
-        "De gegevens worden alleen weergegeven."
-    )
-    st.dataframe(data, use_container_width=kwargs.get("use_container_width", False))
-    return data
-
-
-def create_empty_data_store() -> Dict[str, object]:
-    return {
-        "buffer": {"amount": 0.0},
-        "savings": {
-            "start_balance": 0.0,
-            "monthly_contribution": 0.0,
-            "interest_rate_pa": 0.0,
-        },
-        "investments": {
-            "start_balance": 0.0,
-            "monthly_contribution_phase1": 0.0,
-            "monthly_contribution_phase2": 0.0,
-            "avg_return_pa": 0.0,
-            "good_return_pa": 0.0,
-        },
-        "plan": {
-            "months_phase1": 12,
-            "months_phase2": 0,
-            "inflation_pa": 0.0,
-            "target_savings": 0.0,
-        },
-        "income": pd.DataFrame(columns=INCOME_COLUMNS),
-        "expenses": pd.DataFrame(columns=EXPENSE_COLUMNS),
-        "wishlist": pd.DataFrame(columns=WISHLIST_COLUMNS),
-    }
+CREDENTIALS: Dict[str, str] = {
+    "planner": hash_password("veiligwachtwoord"),
+}
 
 
 def init_session_state() -> None:
@@ -175,33 +39,68 @@ def init_session_state() -> None:
         st.session_state.authenticated = False
         st.session_state.username = None
 
+    if "data_store" not in st.session_state:
+        st.session_state.data_store = {
+            "buffer": {"amount": 6000.0},
+            "savings": {
+                "start_balance": 10_000.0,
+                "monthly_contribution": 250.0,
+                "interest_rate_pa": 0.0275,
+            },
+            "investments": {
+                "start_balance": 3500.0,
+                "monthly_contribution_phase1": 100.0,
+                "monthly_contribution_phase2": 250.0,
+                "avg_return_pa": 0.05,
+                "good_return_pa": 0.07,
+            },
+            "plan": {
+                "months_phase1": 24,
+                "months_phase2": 60,
+                "inflation_pa": 0.035,
+                "target_savings": 27_500.0,
+            },
+            "income": pd.DataFrame(
+                [
+                    {"Bron": "Salaris", "Bedrag": 3200.0, "Frequentie": "Maandelijks"},
+                    {"Bron": "Freelance", "Bedrag": 600.0, "Frequentie": "Maandelijks"},
+                ]
+            ),
+            "expenses": pd.DataFrame(
+                [
+                    {"Categorie": "Huur/Hypotheek", "Bedrag": 1200.0, "Frequentie": "Maandelijks"},
+                    {"Categorie": "Boodschappen", "Bedrag": 450.0, "Frequentie": "Maandelijks"},
+                    {"Categorie": "Vrije tijd", "Bedrag": 200.0, "Frequentie": "Maandelijks"},
+                ]
+            ),
+            "wishlist": pd.DataFrame(
+                [
+                    {
+                        "Doel": "Noodbuffer 6 maanden",
+                        "Doelbedrag": 9000.0,
+                        "Maandelijkse Bijdrage": 300.0,
+                    },
+                    {
+                        "Doel": "Vakantie Canada",
+                        "Doelbedrag": 5000.0,
+                        "Maandelijkse Bijdrage": 200.0,
+                    },
+                ]
+            ),
+        }
+
     if "active_page" not in st.session_state:
         st.session_state.active_page = "Home"
 
 
-def ensure_user_data_store() -> None:
-    username = st.session_state.get("username")
-    if not username:
-        return
-
-    stores: Dict[str, Dict[str, object]] = st.session_state.setdefault("user_data", {})
-    if username not in stores:
-        stores[username] = create_empty_data_store()
-
-    st.session_state.data_store = stores[username]
-
-
 def authenticate(username: str, password: str) -> bool:
-    backend = load_auth_backend()
-    if backend is None or not backend.configured:
-        return False
-    return backend.authenticate(username, password)
+    stored = CREDENTIALS.get(username)
+    return stored == hash_password(password)
 
 
 def logout() -> None:
     st.session_state.authenticated = False
     st.session_state.username = None
-    st.session_state.pop("data_store", None)
     st.session_state.active_page = "Home"
     st.experimental_rerun()
 
@@ -248,22 +147,6 @@ def simulate_plan(
     total_months = months_phase1 + months_phase2
     inflation_index = 1.0
 
-    columns = [
-        "Maand",
-        "Fase",
-        "Spaarrekening",
-        "Investeringen",
-        "Buffer",
-        "Totaal (nominaal)",
-        "Inflatie Index",
-        "Totaal (reëel)",
-        "Storting Sparen",
-        "Storting Beleggen",
-    ]
-
-    if total_months <= 0:
-        return pd.DataFrame(columns=columns)
-
     for month in range(1, total_months + 1):
         in_phase1 = month <= months_phase1
         deposit_savings = monthly_savings_phase1 if in_phase1 else 0.0
@@ -297,7 +180,7 @@ def simulate_plan(
             }
         )
 
-    return pd.DataFrame(rows, columns=columns)
+    return pd.DataFrame(rows)
 
 
 def get_projection_frames() -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -430,36 +313,29 @@ def render_savings() -> None:
     df_avg, df_good = get_projection_frames()
 
     st.subheader("Ontwikkeling spaarrekening")
-    if df_avg.empty:
-        st.info(
-            "Voer maanden, stortingen en rente in om een prognose voor de "
-            "spaarrekening te zien."
+    chart_df = pd.DataFrame(
+        {
+            "Maand": df_avg["Maand"],
+            "Gemiddeld scenario": df_avg["Spaarrekening"],
+            "Optimistisch scenario": df_good["Spaarrekening"],
+        }
+    ).set_index("Maand")
+    st.line_chart(chart_df)
+
+    saldo_phase1 = get_value_for_month(df_avg, new_months_phase1, "Spaarrekening")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Saldo na Fase 1", f"€ {saldo_phase1:,.0f}")
+    with col2:
+        st.metric(
+            "Saldo einde plan (gemiddeld)", f"€ {df_avg.iloc[-1]['Spaarrekening']:,.0f}"
         )
-    else:
-        chart_df = pd.DataFrame(
-            {
-                "Maand": df_avg["Maand"],
-                "Gemiddeld scenario": df_avg["Spaarrekening"],
-                "Optimistisch scenario": df_good["Spaarrekening"],
-            }
-        ).set_index("Maand")
-        st.line_chart(chart_df)
 
-        saldo_phase1 = get_value_for_month(df_avg, new_months_phase1, "Spaarrekening")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("Saldo na Fase 1", f"€ {saldo_phase1:,.0f}")
-        with col2:
-            st.metric(
-                "Saldo einde plan (gemiddeld)",
-                f"€ {df_avg.iloc[-1]['Spaarrekening']:,.0f}",
-            )
-
-        st.dataframe(
-            df_avg[["Maand", "Fase", "Spaarrekening", "Storting Sparen"]],
-            use_container_width=True,
-        )
+    st.dataframe(
+        df_avg[["Maand", "Fase", "Spaarrekening", "Storting Sparen"]],
+        use_container_width=True,
+    )
 
     if st.button("⬅️ Terug naar Home", key="back-savings"):
         st.session_state.active_page = "Home"
@@ -535,41 +411,30 @@ def render_investments() -> None:
     df_avg, df_good = get_projection_frames()
 
     st.subheader("Ontwikkeling beleggingen")
-    if df_avg.empty:
-        st.info(
-            "Voer je investeringsinleg, looptijden en rendementen in om de "
-            "scenario's te bekijken."
-        )
-    else:
-        chart_df = pd.DataFrame(
-            {
-                "Maand": df_avg["Maand"],
-                "Gemiddeld scenario": df_avg["Investeringen"],
-                "Optimistisch scenario": df_good["Investeringen"],
-            }
-        ).set_index("Maand")
-        st.line_chart(chart_df)
+    chart_df = pd.DataFrame(
+        {
+            "Maand": df_avg["Maand"],
+            "Gemiddeld scenario": df_avg["Investeringen"],
+            "Optimistisch scenario": df_good["Investeringen"],
+        }
+    ).set_index("Maand")
+    st.line_chart(chart_df)
 
-        phase1_months = st.session_state.data_store["plan"]["months_phase1"]
-        belegging_phase1 = get_value_for_month(df_avg, phase1_months, "Investeringen")
+    phase1_months = st.session_state.data_store["plan"]["months_phase1"]
+    belegging_phase1 = get_value_for_month(df_avg, phase1_months, "Investeringen")
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Beleggingen einde Fase 1", f"€ {belegging_phase1:,.0f}")
-        with col2:
-            st.metric(
-                "Beleggingen einde plan",
-                f"€ {df_avg.iloc[-1]['Investeringen']:,.0f}",
-            )
-        with col3:
-            st.metric(
-                "Reëel vermogen", f"€ {df_avg.iloc[-1]['Totaal (reëel)']:,.0f}"
-            )
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Beleggingen einde Fase 1", f"€ {belegging_phase1:,.0f}")
+    with col2:
+        st.metric("Beleggingen einde plan", f"€ {df_avg.iloc[-1]['Investeringen']:,.0f}")
+    with col3:
+        st.metric("Reëel vermogen", f"€ {df_avg.iloc[-1]['Totaal (reëel)']:,.0f}")
 
-        st.dataframe(
-            df_avg[["Maand", "Investeringen", "Storting Beleggen", "Totaal (nominaal)"]],
-            use_container_width=True,
-        )
+    st.dataframe(
+        df_avg[["Maand", "Investeringen", "Storting Beleggen", "Totaal (nominaal)"]],
+        use_container_width=True,
+    )
 
     if st.button("⬅️ Terug naar Home", key="back-investments"):
         st.session_state.active_page = "Home"
@@ -585,7 +450,7 @@ def render_income() -> None:
         "De wijzigingen worden direct opgeslagen en gebruikt in andere pagina's."
     )
 
-    income_df = safe_data_editor(
+    income_df = st.data_editor(
         st.session_state.data_store["income"],
         num_rows="dynamic",
         use_container_width=True,
@@ -607,7 +472,7 @@ def render_budget() -> None:
     st.header("🧮 Budget")
     st.caption("Analyseer je maandelijkse cashflow en allocatie.")
 
-    expenses_df = safe_data_editor(
+    expenses_df = st.data_editor(
         st.session_state.data_store["expenses"],
         num_rows="dynamic",
         use_container_width=True,
@@ -668,7 +533,7 @@ def render_wishlist() -> None:
     st.header("🎯 Wishlist")
     st.caption("Organiseer spaardoelen en voortgang over de planningshorizon.")
 
-    wishlist_df = safe_data_editor(
+    wishlist_df = st.data_editor(
         st.session_state.data_store["wishlist"],
         num_rows="dynamic",
         use_container_width=True,
@@ -685,29 +550,19 @@ def render_wishlist() -> None:
 
     cashflow = compute_cashflow_summary()
     df_avg, _ = get_projection_frames()
-    total_future_nominal = (
-        float(df_avg.iloc[-1]["Totaal (nominaal)"])
-        if not df_avg.empty
-        else 0.0
-    )
+    total_future_nominal = df_avg.iloc[-1]["Totaal (nominaal)"]
 
     total_goal_contrib = float(wishlist_df["Maandelijkse Bijdrage"].sum())
     st.metric("Totale maandelijkse doel-bijdrage", f"€ {total_goal_contrib:,.0f}")
 
     plan_months_total = cashflow["plan_months_total"]
 
-    if df_avg.empty:
-        st.info(
-            "Configureer je spaardoelen en planlooptijd op de andere pagina's om "
-            "hier voortgang bij te houden."
-        )
-
     for _, row in wishlist_df.iterrows():
         goal = str(row["Doel"]) if not pd.isna(row["Doel"]) else "Onbenoemd doel"
         goal_amount = float(row["Doelbedrag"])
         monthly_contrib = float(row["Maandelijkse Bijdrage"])
 
-        with bordered_container(border=True):
+        with st.container(border=True):
             st.subheader(goal)
             st.write(f"Doelbedrag: € {goal_amount:,.0f}")
             st.write(f"Maandelijkse bijdrage: € {monthly_contrib:,.0f}")
@@ -732,7 +587,7 @@ def render_wishlist() -> None:
                 months_needed = math.inf
                 progress_text = "Voeg een doelbedrag toe"
 
-            safe_progress(progress, text=progress_text)
+            st.progress(progress, text=progress_text)
 
             if goal_amount > 0:
                 coverage = min(1.0, total_future_nominal / goal_amount)
@@ -757,16 +612,8 @@ def render_home() -> None:
     )
 
     df_avg, df_good = get_projection_frames()
+    final_avg = df_avg.iloc[-1]
     cashflow = compute_cashflow_summary()
-
-    final_avg = df_avg.iloc[-1] if not df_avg.empty else None
-    savings_end = (
-        float(final_avg["Spaarrekening"]) if final_avg is not None else 0.0
-    )
-    investments_end = (
-        float(final_avg["Investeringen"]) if final_avg is not None else 0.0
-    )
-    net_cashflow = cashflow["net_cashflow"]
 
     target = st.session_state.data_store["plan"]["target_savings"]
     savings_now = st.session_state.data_store["savings"]["start_balance"]
@@ -774,21 +621,15 @@ def render_home() -> None:
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Spaarrekening aan einde plan", f"€ {savings_end:,.0f}")
+        st.metric("Spaarrekening aan einde plan", f"€ {final_avg['Spaarrekening']:,.0f}")
     with col2:
-        st.metric("Investeringen aan einde plan", f"€ {investments_end:,.0f}")
+        st.metric("Investeringen aan einde plan", f"€ {final_avg['Investeringen']:,.0f}")
     with col3:
-        st.metric("Netto cashflow per maand", f"€ {net_cashflow:,.0f}")
+        st.metric("Netto cashflow per maand", f"€ {cashflow['net_cashflow']:,.0f}")
     with col4:
         st.metric("Doel spaarrekening", f"€ {target:,.0f}")
 
-    safe_progress(target_progress, text=f"{target_progress * 100:,.0f}% van spaardoel bereikt")
-
-    if df_avg.empty:
-        st.info(
-            "Voeg gegevens toe op de verschillende pagina's om projecties en "
-            "voortgang te zien."
-        )
+    st.progress(target_progress, text=f"{target_progress * 100:,.0f}% van spaardoel bereikt")
 
     st.markdown("---")
 
@@ -825,7 +666,7 @@ def render_home() -> None:
     for index, page in enumerate(cards):
         column = card_columns[index % 3]
         with column:
-            with bordered_container(border=True):
+            with st.container(border=True):
                 st.subheader(f"{page.icon} {page.name}")
                 st.write(page.description)
                 if st.button(f"Open {page.name}", key=f"card-{page.name}"):
@@ -896,21 +737,13 @@ def render_login() -> None:
     st.title("🔐 Toekomstbestendig Beleggen")
     st.caption("Log in om je persoonlijke financiële dashboard te openen.")
 
-    backend = load_auth_backend()
-    backend_configured = backend is not None and backend.configured
-
     with st.form("login-form"):
         username = st.text_input("Gebruikersnaam")
         password = st.text_input("Wachtwoord", type="password")
         submitted = st.form_submit_button("Inloggen")
 
     if submitted:
-        if not backend_configured:
-            st.error(
-                "Authenticatie is niet geconfigureerd. "
-                "Voeg gebruikers toe aan `.streamlit/secrets.toml`."
-            )
-        elif authenticate(username, password):
+        if authenticate(username, password):
             st.session_state.authenticated = True
             st.session_state.username = username
             st.success("Succesvol ingelogd!")
@@ -918,45 +751,7 @@ def render_login() -> None:
         else:
             st.error("Ongeldige gebruikersnaam of wachtwoord.")
 
-    if not backend_configured:
-        st.info(
-            "Voeg in `.streamlit/secrets.toml` een sectie toe zoals hieronder zodat "
-            "iedere gebruiker zijn eigen inloggegevens krijgt."
-        )
-        st.code(
-            """
-[connections.secure_auth]
-users.jouw_gebruiker.salt = "<genereerde_salt>"
-users.jouw_gebruiker.password_hash = "<hash_van_wachtwoord>"
-""".strip(),
-            language="toml",
-        )
-
-    with st.expander("Hulp nodig bij het genereren van een wachtwoordhash?"):
-        st.write(
-            "Gebruik de generator hieronder om een veilig wachtwoord te hashen. "
-            "Voeg daarna de waarden toe aan `secrets.toml`."
-        )
-        password_to_hash = st.text_input(
-            "Nieuw wachtwoord", type="password", key="hash-password-input"
-        )
-        custom_salt = st.text_input(
-            "Optionele salt (leeg laat genereert een random waarde)",
-            key="hash-salt-input",
-        )
-        if st.button("Genereer hash", key="generate-hash"):
-            if not password_to_hash:
-                st.warning("Voer eerst een wachtwoord in dat je wilt hashen.")
-            else:
-                salt, password_hash = generate_password_hash(
-                    password_to_hash,
-                    custom_salt or None,
-                )
-                st.success("Hash succesvol gegenereerd.")
-                st.code(
-                    f"salt = \"{salt}\"\npassword_hash = \"{password_hash}\"",
-                    language="toml",
-                )
+    st.info("Gebruik testaccount **planner / veiligwachtwoord** om te starten.")
 
 
 def main() -> None:
@@ -965,8 +760,6 @@ def main() -> None:
     if not st.session_state.authenticated:
         render_login()
         return
-
-    ensure_user_data_store()
 
     pages: Dict[str, Callable[[], None]] = {
         "Home": render_home,
